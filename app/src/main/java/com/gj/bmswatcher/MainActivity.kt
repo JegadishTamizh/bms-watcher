@@ -51,8 +51,8 @@ class MainActivity : AppCompatActivity() {
         etUrl.setText(prefs.getString(BookingCheckWorker.KEY_URL, ""))
         etInterval.setText(prefs.getInt(BookingCheckWorker.KEY_INTERVAL, 15).toString())
 
-        findViewById<Button>(R.id.btnStart).setOnClickListener { onStart() }
-        findViewById<Button>(R.id.btnStop).setOnClickListener { onStop() }
+        findViewById<Button>(R.id.btnStart).setOnClickListener { handleStart() }
+        findViewById<Button>(R.id.btnStop).setOnClickListener { handleStop() }
         findViewById<Button>(R.id.btnTest).setOnClickListener { onTest() }
 
         renderStatus()
@@ -92,7 +92,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun onStart() {
+    private fun handleStart() {
         val (url, interval) = readInputs() ?: return
         prefs.edit()
             .putString(BookingCheckWorker.KEY_URL, url)
@@ -105,7 +105,7 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "Monitoring started", Toast.LENGTH_SHORT).show()
     }
 
-    private fun onStop() {
+    private fun handleStop() {
         prefs.edit().putBoolean(BookingCheckWorker.KEY_ACTIVE, false).apply()
         BookingCheckWorker.stopMonitoring(this)
         Toast.makeText(this, "Monitoring stopped", Toast.LENGTH_SHORT).show()
