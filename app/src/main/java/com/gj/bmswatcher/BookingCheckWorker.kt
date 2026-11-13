@@ -143,6 +143,7 @@ class BookingCheckWorker(
             }
         }
 
+    @SuppressLint("MissingPermission")
     private fun notifyOpen(ctx: Context, url: String): Boolean {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS)
@@ -171,7 +172,6 @@ class BookingCheckWorker(
             .setAutoCancel(true)
             .build()
 
-        @SuppressLint("MissingPermission")
         NotificationManagerCompat.from(ctx).notify(NOTIF_ID, notification)
         return true
     }
