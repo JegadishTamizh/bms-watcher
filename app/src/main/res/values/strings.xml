@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BMS Watcher</string>
+    <string name="hint_url">Paste BookMyShow cinema date URL</string>
+    <string name="hint_interval">Check interval (minutes)</string>
+    <string name="btn_start">Start Monitoring</string>
+    <string name="btn_stop">Stop Monitoring</string>
+    <string name="btn_test">Test Now</string>
+    <string name="status_initial">Status: Stopped</string>
+</resources>
