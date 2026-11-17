@@ -60,33 +60,40 @@ class BookingCheckWorker(
             return Result.success()
         }
 
-        val (finalUrl, title) = try {
+        val (finalUrl, title, pageText) = try {
             loadInWebView(url)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            Pair("", "")
+            Triple("", "", "")
         }
 
+        val lowerText = pageText.lowercase()
+        val noShows = EMPTY_PHRASES.any { lowerText.contains(it) }
         val dateKept = finalUrl.contains(targetDate)
         val titleBad = title.isBlank() ||
             title.contains("Just a moment", ignoreCase = true) ||
             title.contains("Attention Required", ignoreCase = true) ||
             title.contains("Access Denied", ignoreCase = true)
-        val open = dateKept && !titleBad
+        val open = dateKept && !titleBad && !noShows
 
         val resultText = when {
             finalUrl.isBlank() -> "NO RESULT: page failed to load or timed out"
             titleBad -> "BLOCKED/BLANK: Cloudflare challenge or empty title, cannot tell"
             !dateKept -> "CLOSED: redirected away from $targetDate"
+            noShows -> "CLOSED: page says no shows found yet"
             else -> "OPEN: bookings detected!"
         }
-        saveLog(prefs, finalUrl, title, resultText)
+
+        // Show a short snippet of the page text in the log so wording can be checked.
+        val snippet = pageText.replace(Regex("\\s+"), " ").trim().take(120)
+        val titleForLog = if (snippet.isBlank()) title else "$title || TEXT: $snippet"
+        saveLog(prefs, finalUrl, titleForLog, resultText)
 
         if (open) {
             val shown = notifyOpen(ctx, url)
             if (!shown) {
-                saveLog(prefs, finalUrl, title, "$resultText (but notification permission is OFF!)")
+                saveLog(prefs, finalUrl, titleForLog, "$resultText (but notification permission is OFF!)")
             }
             if (!manual) {
                 prefs.edit().putBoolean(KEY_ACTIVE, false).apply()
@@ -99,25 +106,48 @@ class BookingCheckWorker(
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun loadInWebView(url: String): Pair<String, String> =
+    private suspend fun loadInWebView(url: String): Triple<String, String, String> =
         withContext(Dispatchers.Main) {
-            suspendCancellableCoroutine<Pair<String, String>> { cont ->
+            suspendCancellableCoroutine<Triple<String, String, String>> { cont ->
                 val handler = Handler(Looper.getMainLooper())
                 val webView = WebView(applicationContext)
                 var done = false
 
-                fun finish() {
+                fun cleanup() {
+                    webView.stopLoading()
+                    webView.destroy()
+                }
+
+                fun finish(readText: Boolean) {
                     if (done) return
                     done = true
                     handler.removeCallbacksAndMessages(null)
-                    val result = Pair(webView.url.orEmpty(), webView.title.orEmpty())
-                    webView.stopLoading()
-                    webView.destroy()
-                    if (cont.isActive) cont.resume(result)
+                    val u = webView.url.orEmpty()
+                    val t = webView.title.orEmpty()
+
+                    if (!readText) {
+                        cleanup()
+                        if (cont.isActive) cont.resume(Triple(u, t, ""))
+                        return
+                    }
+
+                    var replied = false
+                    fun reply(text: String) {
+                        if (replied) return
+                        replied = true
+                        cleanup()
+                        if (cont.isActive) cont.resume(Triple(u, t, text))
+                    }
+
+                    // Fallback in case the JavaScript callback never arrives.
+                    handler.postDelayed({ reply("") }, 3_000L)
+                    webView.evaluateJavascript(
+                        "(function(){return document.body ? document.body.innerText.substring(0, 4000) : '';})()"
+                    ) { raw -> reply(decodeJs(raw)) }
                 }
 
-                val settleRunnable = Runnable { finish() }
-                val timeoutRunnable = Runnable { finish() }
+                val settleRunnable = Runnable { finish(true) }
+                val timeoutRunnable = Runnable { finish(true) }
 
                 webView.settings.apply {
                     javaScriptEnabled = true
@@ -138,10 +168,19 @@ class BookingCheckWorker(
                 }
 
                 handler.postDelayed(timeoutRunnable, TIMEOUT_MS)
-                cont.invokeOnCancellation { handler.post { finish() } }
+                cont.invokeOnCancellation { handler.post { finish(false) } }
                 webView.loadUrl(url)
             }
         }
+
+    private fun decodeJs(raw: String?): String {
+        if (raw.isNullOrBlank() || raw == "null") return ""
+        return try {
+            org.json.JSONTokener(raw).nextValue() as? String ?: ""
+        } catch (e: Exception) {
+            raw
+        }
+    }
 
     @SuppressLint("MissingPermission")
     private fun notifyOpen(ctx: Context, url: String): Boolean {
@@ -195,6 +234,18 @@ class BookingCheckWorker(
         private const val SETTLE_MS = 6_000L
         private const val TIMEOUT_MS = 60_000L
         private val VIBRATION = longArrayOf(0, 600, 300, 600, 300, 900)
+
+        // If the page text contains any of these (lowercase), treat bookings as NOT open.
+        private val EMPTY_PHRASES = listOf(
+            "could not find",
+            "couldn't find",
+            "no shows",
+            "no showtimes",
+            "no results found",
+            "nothing found",
+            "find anything",
+            "no shows available"
+        )
 
         fun extractDate(url: String): String? {
             val path = url.substringBefore('?').substringBefore('#').trimEnd('/')
