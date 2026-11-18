@@ -18,6 +18,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var etUrl: EditText
     private lateinit var etInterval: EditText
+    private lateinit var etKeywords: EditText
     private lateinit var tvStatus: TextView
 
     private val prefs: SharedPreferences by lazy {
@@ -46,14 +47,16 @@ class MainActivity : AppCompatActivity() {
 
         etUrl = findViewById(R.id.etUrl)
         etInterval = findViewById(R.id.etInterval)
+        etKeywords = findViewById(R.id.etKeywords)
         tvStatus = findViewById(R.id.tvStatus)
 
         etUrl.setText(prefs.getString(BookingCheckWorker.KEY_URL, ""))
         etInterval.setText(prefs.getInt(BookingCheckWorker.KEY_INTERVAL, 15).toString())
+        etKeywords.setText(prefs.getString(BookingCheckWorker.KEY_KEYWORDS, ""))
 
         findViewById<Button>(R.id.btnStart).setOnClickListener { handleStart() }
         findViewById<Button>(R.id.btnStop).setOnClickListener { handleStop() }
-        findViewById<Button>(R.id.btnTest).setOnClickListener { onTest() }
+        findViewById<Button>(R.id.btnTest).setOnClickListener { handleTest() }
 
         renderStatus()
     }
@@ -71,6 +74,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun readInputs(): Pair<String, Int>? {
         val url = etUrl.text.toString().trim()
+            .replace(Regex("^(?i)https?://")) { it.value.lowercase() }
         val interval = etInterval.text.toString().trim().toIntOrNull() ?: 15
         if (!url.startsWith("http") || BookingCheckWorker.extractDate(url) == null) {
             Toast.makeText(this, "URL must start with http and end with a YYYYMMDD date", Toast.LENGTH_LONG).show()
@@ -97,8 +101,10 @@ class MainActivity : AppCompatActivity() {
         prefs.edit()
             .putString(BookingCheckWorker.KEY_URL, url)
             .putInt(BookingCheckWorker.KEY_INTERVAL, interval)
+            .putString(BookingCheckWorker.KEY_KEYWORDS, etKeywords.text.toString().trim())
             .putBoolean(BookingCheckWorker.KEY_ACTIVE, true)
             .putString(BookingCheckWorker.KEY_LOG_RESULT, "Waiting for first check...")
+            .putString(BookingCheckWorker.KEY_LOG_MATCH, "")
             .apply()
         ensureNotificationPermission()
         BookingCheckWorker.startMonitoring(this, interval)
@@ -111,12 +117,14 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "Monitoring stopped", Toast.LENGTH_SHORT).show()
     }
 
-    private fun onTest() {
+    private fun handleTest() {
         val (url, interval) = readInputs() ?: return
         prefs.edit()
             .putString(BookingCheckWorker.KEY_URL, url)
             .putInt(BookingCheckWorker.KEY_INTERVAL, interval)
+            .putString(BookingCheckWorker.KEY_KEYWORDS, etKeywords.text.toString().trim())
             .putString(BookingCheckWorker.KEY_LOG_RESULT, "Test running... (takes about 10-70 seconds)")
+            .putString(BookingCheckWorker.KEY_LOG_MATCH, "")
             .apply()
         ensureNotificationPermission()
         BookingCheckWorker.runTestNow(this)
@@ -127,15 +135,18 @@ class MainActivity : AppCompatActivity() {
         val interval = prefs.getInt(BookingCheckWorker.KEY_INTERVAL, 15)
         val url = prefs.getString(BookingCheckWorker.KEY_URL, "").orEmpty()
         val date = BookingCheckWorker.extractDate(url) ?: "-"
+        val keywords = prefs.getString(BookingCheckWorker.KEY_KEYWORDS, "").orEmpty()
 
         val text = buildString {
             append("Monitoring: ")
             append(if (active) "ACTIVE (every $interval min)" else "STOPPED")
             append("\nTarget date: ").append(date)
+            append("\nKeywords: ").append(keywords.ifBlank { "-" })
             append("\nLast checked: ").append(prefs.getString(BookingCheckWorker.KEY_LOG_TIME, "-"))
             append("\nResolved URL: ").append(prefs.getString(BookingCheckWorker.KEY_LOG_URL, "-").orEmpty().ifBlank { "-" })
             append("\nPage title: ").append(prefs.getString(BookingCheckWorker.KEY_LOG_TITLE, "-").orEmpty().ifBlank { "-" })
             append("\nResult: ").append(prefs.getString(BookingCheckWorker.KEY_LOG_RESULT, "-"))
+            append("\nMatched: ").append(prefs.getString(BookingCheckWorker.KEY_LOG_MATCH, "-").orEmpty().ifBlank { "-" })
         }
         tvStatus.text = text
     }

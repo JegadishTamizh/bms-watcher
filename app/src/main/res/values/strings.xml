@@ -7,4 +7,5 @@
     <string name="btn_stop">Stop Monitoring</string>
     <string name="btn_test">Test Now</string>
     <string name="status_initial">Status: Stopped</string>
+    <string name="hint_keywords">Keywords (optional), e.g. atmos, dts</string>
 </resources>

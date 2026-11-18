@@ -38,6 +38,8 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
+data class KeywordMatch(val matched: Boolean, val where: String)
+
 class BookingCheckWorker(
     context: Context,
     params: WorkerParameters
@@ -53,10 +55,11 @@ class BookingCheckWorker(
 
         val url = prefs.getString(KEY_URL, "").orEmpty()
         val interval = prefs.getInt(KEY_INTERVAL, 15)
+        val keywords = prefs.getString(KEY_KEYWORDS, "").orEmpty().trim()
         val targetDate = extractDate(url)
 
         if (url.isBlank() || targetDate == null) {
-            saveLog(prefs, "", "", "ERROR: URL must end with a YYYYMMDD date")
+            saveLog(prefs, "", "", "ERROR: URL must end with a YYYYMMDD date", "")
             return Result.success()
         }
 
@@ -75,25 +78,36 @@ class BookingCheckWorker(
             title.contains("Just a moment", ignoreCase = true) ||
             title.contains("Attention Required", ignoreCase = true) ||
             title.contains("Access Denied", ignoreCase = true)
-        val open = dateKept && !titleBad && !noShows
+        val pageOpen = dateKept && !titleBad && !noShows
+
+        // Keyword check only runs when the page itself looks open.
+        var matchInfo = ""
+        var open = pageOpen
+        if (pageOpen && keywords.isNotBlank()) {
+            val m = matchKeywords(pageText, keywords)
+            open = m.matched
+            matchInfo = if (m.matched) m.where else "none"
+        }
 
         val resultText = when {
             finalUrl.isBlank() -> "NO RESULT: page failed to load or timed out"
             titleBad -> "BLOCKED/BLANK: Cloudflare challenge or empty title, cannot tell"
             !dateKept -> "CLOSED: redirected away from $targetDate"
             noShows -> "CLOSED: page says no shows found yet"
+            keywords.isNotBlank() && !open -> "OPEN page, but no keyword match (still watching)"
+            keywords.isNotBlank() -> "OPEN: keyword match found!"
             else -> "OPEN: bookings detected!"
         }
 
         // Show a short snippet of the page text in the log so wording can be checked.
         val snippet = pageText.replace(Regex("\\s+"), " ").trim().take(120)
         val titleForLog = if (snippet.isBlank()) title else "$title || TEXT: $snippet"
-        saveLog(prefs, finalUrl, titleForLog, resultText)
+        saveLog(prefs, finalUrl, titleForLog, resultText, matchInfo)
 
         if (open) {
-            val shown = notifyOpen(ctx, url)
+            val shown = notifyOpen(ctx, url, matchInfo)
             if (!shown) {
-                saveLog(prefs, finalUrl, titleForLog, "$resultText (but notification permission is OFF!)")
+                saveLog(prefs, finalUrl, titleForLog, "$resultText (but notification permission is OFF!)", matchInfo)
             }
             if (!manual) {
                 prefs.edit().putBoolean(KEY_ACTIVE, false).apply()
@@ -183,7 +197,7 @@ class BookingCheckWorker(
     }
 
     @SuppressLint("MissingPermission")
-    private fun notifyOpen(ctx: Context, url: String): Boolean {
+    private fun notifyOpen(ctx: Context, url: String, detail: String): Boolean {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
@@ -198,11 +212,12 @@ class BookingCheckWorker(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val shortText = if (detail.isBlank()) "Tap to open BookMyShow now." else "Match: $detail"
         val notification = NotificationCompat.Builder(ctx, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("Bookings are OPEN!")
-            .setContentText("Tap to open BookMyShow now.")
-            .setStyle(NotificationCompat.BigTextStyle().bigText("Bookings opened for your date. Tap to open BookMyShow now."))
+            .setContentText(shortText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText("$shortText Tap to open BookMyShow."))
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setSound(alertSound())
@@ -219,12 +234,14 @@ class BookingCheckWorker(
         const val PREFS = "bms_prefs"
         const val KEY_URL = "url"
         const val KEY_INTERVAL = "interval"
+        const val KEY_KEYWORDS = "keywords"
         const val KEY_ACTIVE = "active"
         const val KEY_MANUAL = "manual"
         const val KEY_LOG_TIME = "log_time"
         const val KEY_LOG_URL = "log_url"
         const val KEY_LOG_TITLE = "log_title"
         const val KEY_LOG_RESULT = "log_result"
+        const val KEY_LOG_MATCH = "log_match"
 
         const val TAG = "bms_monitor"
         const val UNIQUE_PERIODIC = "bms_periodic"
@@ -251,6 +268,64 @@ class BookingCheckWorker(
             val path = url.substringBefore('?').substringBefore('#').trimEnd('/')
             val d = path.takeLast(8)
             return if (d.length == 8 && d.all { it.isDigit() }) d else null
+        }
+
+        // Each theatre section in the page text starts with the theatre name and
+        // contains a line like "Cancellation available" or "Non-cancellable".
+        private fun isCancelMarker(line: String): Boolean {
+            val l = line.lowercase()
+            return l.contains("cancellation available") ||
+                l.contains("non-cancellable") ||
+                l.contains("non cancellable")
+        }
+
+        // Offer lines can sit between a theatre name and its cancellation line.
+        private fun isPromo(line: String): Boolean {
+            val l = line.lowercase()
+            return l.contains("code:") || l.contains("% off") || l.contains("offer")
+        }
+
+        /**
+         * keywords: comma separated alternatives. Inside one alternative, every word
+         * must appear in the same theatre section. Capital letters are ignored.
+         */
+        fun matchKeywords(pageText: String, keywords: String): KeywordMatch {
+            val entries = keywords.split(',')
+                .map { it.trim().lowercase() }
+                .filter { it.isNotBlank() }
+                .map { e -> e.split(Regex("\\s+")).filter { it.isNotBlank() } }
+            if (entries.isEmpty()) return KeywordMatch(true, "")
+
+            val lines = pageText.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+            val markers = lines.indices.filter { isCancelMarker(lines[it]) }
+
+            val blocks = mutableListOf<Pair<String, String>>()
+            if (markers.isEmpty()) {
+                // Could not split into theatres: fall back to the whole page.
+                blocks.add(Pair("whole page (no theatre sections found)", lines.joinToString(" ")))
+            } else {
+                val starts = markers.map { m ->
+                    var i = m - 1
+                    while (i > 0 && isPromo(lines[i])) i--
+                    if (i < 0) 0 else i
+                }
+                for (k in starts.indices) {
+                    val from = starts[k]
+                    val to = if (k + 1 < starts.size) starts[k + 1] else lines.size
+                    if (to <= from) continue
+                    blocks.add(Pair(lines[from], lines.subList(from, to).joinToString(" ")))
+                }
+            }
+
+            for ((name, text) in blocks) {
+                val low = text.lowercase()
+                for (words in entries) {
+                    if (words.all { low.contains(it) }) {
+                        return KeywordMatch(true, "${words.joinToString(" ")} in $name")
+                    }
+                }
+            }
+            return KeywordMatch(false, "")
         }
 
         private fun alertSound(): Uri =
@@ -280,13 +355,14 @@ class BookingCheckWorker(
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
 
-        fun saveLog(prefs: SharedPreferences, url: String, title: String, result: String) {
+        fun saveLog(prefs: SharedPreferences, url: String, title: String, result: String, match: String) {
             val time = SimpleDateFormat("dd MMM yyyy, HH:mm:ss", Locale.getDefault()).format(Date())
             prefs.edit()
                 .putString(KEY_LOG_TIME, time)
                 .putString(KEY_LOG_URL, url)
                 .putString(KEY_LOG_TITLE, title)
                 .putString(KEY_LOG_RESULT, result)
+                .putString(KEY_LOG_MATCH, match)
                 .apply()
         }
 

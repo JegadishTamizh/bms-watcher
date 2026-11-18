@@ -27,6 +27,14 @@
             android:inputType="number"
             android:text="15" />
 
+        <EditText
+            android:id="@+id/etKeywords"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="@string/hint_keywords"
+            android:inputType="text" />
+
         <Button
             android:id="@+id/btnStart"
             android:layout_width="match_parent"
